@@ -13,16 +13,19 @@ def activation_summary(x):
     tf.summary.histogram(tensor_name + '/activations', x)
     tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
 
-def create_variable(name, shape, initializer = None):
+def create_variable(name, shape, initializer = tf.contrib.layers.xavier_initializer()):
     '''
     By this function, we don't need to redefine when create a new variable
     name: variable name
     shape: new created variable shape
     initializer: defined for get_variable
     '''
+    weight_decay = 0.0002
+    regularizer = tf.contrib.layers.l2_regularizer(weight_decay)
     if initializer == None:
-        initializer = tf.truncated_normal(shape, stddev = 0.01)
-    new_variable = tf.get_variable(name, shape = shape, initializer = initializer)
+        initializer = tf.truncated_normal_initializer(stddev = 0.01)
+    new_variable = tf.get_variable(name, shape = shape, initializer = initializer,
+                                   regularizer = regularizer)
     return new_variable
 
 def output_layer(input_layer, num_class):
@@ -30,7 +33,7 @@ def output_layer(input_layer, num_class):
     input: 2D tensor, the input to the final output layer
     output: Y = wX + b
     '''
-    input_dim = input_layer.get_shape().aslist()[-1]
+    input_dim = input_layer.get_shape().as_list()[-1]
     w_out = create_variable('w_out',[input_dim, num_class])
     b_out = create_variable('b_out', [num_class], tf.zeros_initializer())
     output = tf.matmul(input_layer, w_out) + b_out
@@ -43,12 +46,14 @@ def batch_norm(input_layer, dim):
     Define batch normalization for input of a layer
     input: layer to input after BN
     '''
-    #dimension = input_layer.get_shape().aslist()[-1]
+    dimension = input_layer.get_shape().as_list()[-1]
     mean, variance = tf.nn.moments(input_layer, axes = [0, 1, 2]) 
     # calculate mean  & variance over batch, width, height for BN (don't do along channels)
-    #beta = tf.Variable('beta', dimension, tf.float32, initializer = tf.constant_initializer(0.0, tf.float32))
-    #gamma = tf.constant(1.0)
-    bn_layer = tf.nn.batch_normalization(input_layer, mean, variance, None, None, tf.constant(BN_EPSILON))
+    beta = tf.get_variable('beta', dimension, tf.float32, 
+                           initializer = tf.constant_initializer(0.0, tf.float32))
+    gamma = tf.get_variable('gamma', dimension, tf.float32, 
+                            initializer = tf.constant_initializer(1.0, tf.float32))
+    bn_layer = tf.nn.batch_normalization(input_layer, mean, variance, beta, gamma, BN_EPSILON)
     
     return bn_layer
 
@@ -71,12 +76,11 @@ def bn_relu_conv(input_layer, filter_size, stride):
     '''
     Do batch_norm -> relu function -> convolution sequentially
     '''
-    out_channel = filter_size[-1]
-    bn_out = batch_norm(input_layer, out_channel)
-    activation = tf.nn.relu(bn_out)
+    in_channel = input_layer.get_shape().as_list()[-1]
+    bn_layer = batch_norm(input_layer, in_channel)
+    relu_layer = tf.nn.relu(bn_layer)
     w_filter = create_variable('conv', filter_size)
-    #bias = tf.Variable(tf.zeros(output_dim))
-    conv_out = tf.nn.conv2d(activation, w_filter, [1, stride, stride, 1], padding = 'SAME') 
+    conv_out = tf.nn.conv2d(relu_layer, w_filter, [1, stride, stride, 1], padding = 'SAME') 
     
     return conv_out
 
@@ -88,7 +92,7 @@ def residual_block(input_layer, output_channel, first_block = False):
     first_block: True is this is the first block of whole network
     return: last layer output of the block
     '''    
-    in_channel = input_layer.get_shape().aslist()[-1]
+    in_channel = input_layer.get_shape().as_list()[-1]
     # along residual block, channel doublely increased. We reduce the image size to maintain data size
     # during coding, use output channel to determine if output feature map size changed
     if in_channel * 2 == output_channel:
@@ -103,8 +107,8 @@ def residual_block(input_layer, output_channel, first_block = False):
     # first conv1 layer in block    
     with tf.variable_scope('conv1_in_block'):
         if first_block: # first conv1 layer in first block doen't need normalization & relu
-           filter = create_variable('conv', [3, 3, in_channel, output_channel])
-           conv1 = tf.nn.conv2d(input_layer, filter, [1, 1, 1, 1], padding = 'SAME') # before first block, max pooling have halved the feature map size, so first output map size remain same
+           Filter = create_variable('conv', [3, 3, in_channel, output_channel])
+           conv1 = tf.nn.conv2d(input_layer, Filter, [1, 1, 1, 1], padding = 'SAME') # before first block, max pooling have halved the feature map size, so first output map size remain same
         else:
             conv1 = bn_relu_conv(input_layer, [3, 3, in_channel, output_channel], stride) # output of first conv. layer in block
             
@@ -115,7 +119,7 @@ def residual_block(input_layer, output_channel, first_block = False):
     # When input channel & output channel don't match, we do zero padding to match
     if increase_dim is True:
         # when channel *2, feature map size divided by 2 for output of block, thus do pooling do decrease map size
-        pool_input = tf.nn.avg_pool(input_layer, ksize = [1, 2, 2, 1], stride = [1, stride, stride, 1], padding = 'VALID') # halved the feature map
+        pool_input = tf.nn.avg_pool(input_layer, ksize = [1, 2, 2, 1], strides = [1, stride, stride, 1], padding = 'VALID') # halved the feature map
         padded_input = tf.pad(pool_input, [[0,0], [0,0], [0,0], [in_channel//2, in_channel//2]])  # doubled input x channels by zero padding(channels are all even number)
     else:
         padded_input = input_layer
@@ -124,7 +128,7 @@ def residual_block(input_layer, output_channel, first_block = False):
 
 def inference(input_data_batch, n_blocks, reuse): 
     '''
-    Define whole ResNet architecture
+    Define whole ResNet architecture, total layers: 1 + 2n + 2n + 2n + 1 = 6n + 2 layers, n = n_block
     n_blocks: number of residual blocks
     reuse: if build train graph, reuse = True. if build validate or test graph, reuse = False.
     return: output of network, logits.
@@ -156,16 +160,15 @@ def inference(input_data_batch, n_blocks, reuse):
     for i in range(n_blocks):
         with tf.variable_scope('conv3_%d'%i, reuse = reuse):
             conv3 = residual_block(layers[-1], 64)
-            activation_summary(conv3)
             layers.append(conv3)
         assert conv3.get_shape().as_list()[1:] == [8, 8, 64] # add an assertion if output shape is abnormal
     
     with tf.variable_scope('fc', reuse = reuse):
-        in_channel = layers[-1].get_shape().aslist()[-1]
+        in_channel = layers[-1].get_shape().as_list()[-1]
         bn_layer = batch_norm(layers[-1], in_channel)
         relu_layer = tf.nn.relu(bn_layer)
         global_pool = tf.reduce_mean(relu_layer, [1, 2]) # global pooling: pool along whole feature map
-        assert global_pool.get_shape().as_list()[-1] == 64 # assert output channel correct
+        assert global_pool.get_shape().as_list()[-1:] == [64] # assert output channel correct
         output = output_layer(global_pool, num_class)
         layers.append(output)
         

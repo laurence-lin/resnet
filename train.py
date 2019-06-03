@@ -5,7 +5,8 @@ import numpy as np
 import time
 import os
 import pandas as pd
-import csv      
+import csv    
+from datetime import datetime  
 
 '''Hyperparamaters at the beginning'''
 '''About data'''
@@ -16,51 +17,95 @@ num_class = 10
 '''About training''' 
 total_data = 50000 
 test_size = 10000
-train_epoch = 500
+train_epoch = 3000
 train_batch_size = 128
 validate_batch_size = 250
-test_batch_size = 125
+test_batch_size = 250
+report_freq = 5
 '''About network configuration'''
 n_residual_block = 5
 padding_size = 2
 '''About model saving and tensorboard showing result'''
 model_save_path = './checkpoint/model'
+model_file_path = './checkpoint/'
 tensorboard_save_path = './tensorboard/'
 # Not sure if needed
 version = 'test110'
-load_ckpt = False
+load_ckpt = False 
 
 class Train(object):
     def __init__(self):
-        self.learn_rate = 0.001
+        self.learn_rate = 0.1
         self.placeholder()
           
     
     def placeholder(self):
-        self.x_data = tf.placeholder(tf.float32, [None, IMG_HEIGHT, IMG_WIDTH, IMG_CHANNEL])
-        self.y_data = tf.placeholder(tf.int32, [None, num_class])
-        self.x_valid = tf.placeholder(tf.float32, [None, IMG_HEIGHT, IMG_WIDTH, IMG_CHANNEL])
-        self.y_valid = self.y_data = tf.placeholder(tf.int32, [None, num_class])
+        self.x_data = tf.placeholder(tf.float32, [train_batch_size, IMG_HEIGHT, IMG_WIDTH, IMG_CHANNEL])
+        self.y_data = tf.placeholder(tf.int32, [train_batch_size])
+        self.x_valid = tf.placeholder(tf.float32, [test_batch_size, IMG_HEIGHT, IMG_WIDTH, IMG_CHANNEL])
+        self.y_valid = tf.placeholder(tf.int32, [test_batch_size])
         
     def train_and_valid_graph(self):
         '''
-        Built train & validate graph at same time
+        Built train & valid graph
         '''
         # We compute train data and validate data on same session graph. By setting
         # variable_scope reuse = True, we could share the weight variables for the 
         # training and validating
+        global_step = tf.Variable(0, trainable = False)
+        validate_step = tf.Variable(0, trainable = False)
         logits = resnet.inference(self.x_data, n_residual_block, False)
         valid_logits = resnet.inference(self.x_valid, n_residual_block, True)  # while reuse = True, share same variables with training model        
         
-        self.train_loss = tf.nn.softmax_cross_entropy_with_logits_v2(logits = logits, labels = self.y_data)
-        self.valid_loss = tf.nn.softmax_cross_entropy_with_logits_v2(logits = valid_logits, labels = self.y_valid)
-        self.train_op = tf.train.AdamOptimizer(self.learn_rate).minimiza(self.train_loss)
+        train_loss = self.loss(logits, self.y_data)
+        regu_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        self.total_loss = tf.add_n([train_loss] + regu_loss)
         prediction = tf.nn.softmax(logits)
-        self.train_top_k_err = self.top_k_error(prediction, self.y_data, 1)
+        self.train_top_k_err = self.top_k_error(prediction, self.y_data, 1) # tensor type error
+        self.train_op, self.train_ema_op = self.train_operation(self.total_loss, self.train_top_k_err, global_step)
+
+        self.valid_loss = self.loss(valid_logits, self.y_valid)
+        valid_prediction = tf.nn.softmax(valid_logits)
+        self.valid_top_k_err = self.top_k_error(valid_prediction, self.y_valid, 1)
+        self.valid_op = self.val_op(validate_step, self.valid_loss, self.valid_top_k_err)
         
+        # Add train loss & error summary to tensorboard
+        tf.summary.scalar('Training loss', self.total_loss)
+        tf.summary.scalar('Top-1 error', self.train_top_k_err)
+        tf.summary.scalar('Validate loss', self.valid_loss)
+        tf.summary.scalar('Validate top-1 error', self.valid_top_k_err)
+        
+    def train_operation(self, total_loss, top_1_err, global_step):
+        '''
+        Define optimizer
+        '''
+        ema_decay = 0.95
+        ema = tf.train.ExponentialMovingAverage(ema_decay, global_step)
+        train_ema_op = ema.apply([total_loss, top_1_err])
+        train_op = tf.train.AdamOptimizer(self.learn_rate).minimize(total_loss, global_step = global_step)
+   
+        return train_op, train_ema_op     
+    
+    def val_op(self, val_step, val_loss, val_top_err):
+        '''
+        Define validation operations
+        val_step: validation step, size [1] tensor
+        val_loss: validation loss, size[1] tensor
+        val_top_err: validation top-1 error, size [1] tensor
+        return: validation operation
+        '''
+        # ema help calculate moving average of valid loss
+        ema = tf.train.ExponentialMovingAverage(0.0, val_step)
+        ema2 = tf.train.ExponentialMovingAverage(0.95, val_step)
+        
+        valid_op = tf.group(val_step.assign_add(1), ema.apply([val_top_err, val_loss]),
+                          ema2.apply([val_top_err, val_loss]))
+        
+        return valid_op
+    
     def top_k_error(self, prediction, label, k):
         '''
-        Generate top-k error
+        Generate top-k error rate
         predictions: 2D tensor with shape[batch, num_labels]
         label: 1D tensor with shape [ num_labels, 1]
         k: int
@@ -69,9 +114,20 @@ class Train(object):
         batch_size = prediction.get_shape().as_list()[0]
         in_top1 = tf.cast(tf.nn.in_top_k(prediction, label, k=1), tf.float32) # use top-1 error, return 1D boolean classify result, turn to float
         num_correct = tf.reduce_sum(in_top1)
-        
+        # here use subtraction for tensor, so return error rate is tensor
         return (batch_size - num_correct)/float(batch_size)
         
+    def loss(self, logits, labels):
+        '''
+        Calculate cross entropy loss btw logits and labels
+        logits: 2D output array [batch_size, num_of_class]
+        labels: 1D array [batch_size]
+        return: loss tensor with shape[1]
+        '''
+        labels = tf.cast(labels, tf.int64) # convert to tensor type int64
+        cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = logits, labels = labels) # sparse softmax loss: input labels have shape [batch_size]
+        cross_entropy_mean = tf.reduce_mean(cross_entropy)
+        return cross_entropy_mean
     
     def generate_augment_train_batch(self, train_data, train_labels, train_batch_size):
         '''
@@ -84,7 +140,7 @@ class Train(object):
         offset = np.random.choice(total_data - train_batch_size) # random choose a start point to count batch, this batch would be augmented
         batch_data = train_data[offset:offset + train_batch_size, :]
         batch_data = cifar.random_crop_flip(batch_data, padding_size) 
-        whitend_data = cifar.whiten_img(batch_data) # augmented data batch
+        whitened_data = cifar.whiten_img(batch_data) # augmented data batch
         batch_label = train_labels[offset:offset + train_batch_size]
         
         return whitened_data, batch_label
@@ -97,7 +153,7 @@ class Train(object):
         batch_data = val_data[offset:offset + test_batch_size, :]
         batch_label = val_label[offset:offset + test_batch_size]
         
-        retrun batch_data, batch_label
+        return batch_data, batch_label
     
     def train(self):
         '''
@@ -116,11 +172,11 @@ class Train(object):
         
         # Determine whether load past checkpoint or not
         if load_ckpt is True:
-            files = os.listdir(model_save_path)
+            files = os.listdir(model_file_path)
             meta_graph = [f for f in files if 'meta' in f]
-            meta_graph = os.path.join(model_save_path, meta_graph[0])
-            saver = tf.train.import_meta_graph(meta_graph)
-            saver.restore(sess, tf.train.latest_checkpoint(model_save_path))
+            meta_graph = os.path.join(model_file_path, meta_graph[0])
+            saver = tf.train.import_meta_graph(meta_graph) # if load past model, don't need initialize all global variables
+            saver.restore(sess, tf.train.latest_checkpoint(model_file_path))
         else:
             sess.run(init)
             
@@ -131,43 +187,57 @@ class Train(object):
         train_err = []
         step_list = []
         top_1_list = []
+        val_err_list = []
         
         print('Start training...')
         print('------------------------------')
         
         for iterate in range(train_epoch):
-            train_data, train_labels = generate_augment_train_batch(all_data, all_labels, train_batch_size)
-            val_data, val_labels = generate_vali_batch(valid_data, valid_labels, test_batch_size)
+            train_data, train_labels = self.generate_augment_train_batch(all_data, all_labels, train_batch_size)
+            val_data, val_labels = self.generate_vali_batch(valid_data, valid_labels, test_batch_size)
             '''In each epoch, only train with one single batch?? '''
-            # Ignore validation, just do training and testing
+            
+            # Do validation before training, use test data here. This validate result could perform as test performance
+            if iterate % report_freq == 0:
+                _, valid_error, valid_loss = sess.run([self.valid_op, self.valid_top_k_err, self.valid_loss],
+                                                   {self.x_valid: val_data, self.y_valid:val_labels})
+                
+                val_err_list.append(valid_error)
+            
+            
             start_time = time.time()
         
-            _, training_loss, top_1_err_rate = sess.run([self.train_op, self.train_loss, self.train_top_k_error], 
-                                                        {x_data: train_data,
-                                                         y_data: train_labels,
-                                                         })
+            _, _, training_loss, top_1_err_rate = sess.run([self.train_op, self.train_ema_op, self.total_loss, self.train_top_k_err], 
+                                                        {self.x_data: train_data,
+                                                         self.y_data: train_labels})
     
-            duration = time.time() = start_time # duration for one training epoch
+            duration = time.time() - start_time # duration for one training epoch
             
+            if iterate % report_freq == 0:
             # Summary for tensorboard result
-            summary_str = sess.run(summary_op, {x_data: train_data,
-                                                y_data: train_labels})
-            summray_writer.add_summary(summary_str)
+                summary_str = sess.run(summary_op, {self.x_data: train_data,
+                                                self.y_data: train_labels,
+                                                self.x_valid: val_data,
+                                                self.y_valid: val_labels})
+                summary_writer.add_summary(summary_str, iterate)
             
-            print('%s: Step: %d,  loss: %.4f'%(datetime.now(), iterate, training_loss))
-            print('Top-1 error rate: ', top_1_err_rate)
+                
+                print('%s: Step: %d,  loss: %.4f'%(datetime.now(), iterate, training_loss))
+                print('Train top-1 error rate: ', top_1_err_rate)
+                print('Validation loss: ', valid_loss)
+                print('Validation top-1 error rate:', valid_error)
             
-            step_list.append(iterate)
-            train_err.append(training_loss)
-            top_1_list.append(top_1_err_rate)
+                step_list.append(iterate)
+                train_err.append(training_loss)
+                top_1_list.append(top_1_err_rate)
             
             # Save model checkpoints every 100 steps
             if iterate % 50 == 0 or (iterate + 1) == train_epoch:
                 saver.save(sess, model_save_path, global_step = iterate)
                 
                 # save train error dataframe
-                df = pd.DataFrame(data = {'steps: ':step_list, 'training loss:', 
-                                          train_err, 'top_1_err:':top_1_list})
+                df = pd.DataFrame(data = {'steps: ':step_list, 'training loss:': 
+                                          train_err, 'top_1_err:':top_1_list, 'valid error: ':valid_error})
     
                 df.to_csv(model_save_path + '_error_list.csv')
        
@@ -191,8 +261,10 @@ class Train(object):
         prediction = tf.nn.softmax(logits)
         
         '''Load in the pre-trained weights'''
-        
         sess = tf.Session()
+        saver = tf.train.import_meta_graph('./checkpoint/model.meta') # load model architecture
+        model_file = tf.train.latest_checkpoint(model_save_path)  # load weights
+        saver.restore(sess, model_file)
         
         print('Model restored from: ', model_save_path)
         
