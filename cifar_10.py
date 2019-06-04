@@ -55,7 +55,7 @@ def transform_image(img_batch): # convert to batch*32*32*3 size
         x.append(img) # insert each image of size: [1, 32, 32, 3]
     
     x = np.array(x)
-    return x # image normalization
+    return x/255 # image normalization
 
 def random_crop_flip(batch_data, padding_size):
     '''

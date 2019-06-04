@@ -13,7 +13,7 @@ def activation_summary(x):
     tf.summary.histogram(tensor_name + '/activations', x)
     tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
 
-def create_variable(name, shape, initializer = tf.contrib.layers.xavier_initializer()):
+def create_variable(name, shape, initializer = None):
     '''
     By this function, we don't need to redefine when create a new variable
     name: variable name
@@ -23,7 +23,7 @@ def create_variable(name, shape, initializer = tf.contrib.layers.xavier_initiali
     weight_decay = 0.0002
     regularizer = tf.contrib.layers.l2_regularizer(weight_decay)
     if initializer == None:
-        initializer = tf.truncated_normal_initializer(stddev = 0.01)
+        initializer = tf.truncated_normal_initializer(stddev = 0.001)
     new_variable = tf.get_variable(name, shape = shape, initializer = initializer,
                                    regularizer = regularizer)
     return new_variable
