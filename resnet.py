@@ -20,10 +20,10 @@ def create_variable(name, shape, initializer = None):
     shape: new created variable shape
     initializer: defined for get_variable
     '''
-    weight_decay = 0.0002
+    weight_decay = 0.0002 
     regularizer = tf.contrib.layers.l2_regularizer(weight_decay)
     if initializer == None:
-        initializer = tf.truncated_normal_initializer(stddev = 0.001)
+        initializer = tf.truncated_normal_initializer(stddev = 0.001) # the more complex the model is, the smaller initialize the weight
     new_variable = tf.get_variable(name, shape = shape, initializer = initializer,
                                    regularizer = regularizer)
     return new_variable
@@ -118,7 +118,7 @@ def residual_block(input_layer, output_channel, first_block = False):
     # Add short cut connection, check channel if it is changed
     # When input channel & output channel don't match, we do zero padding to match
     if increase_dim is True:
-        # when channel *2, feature map size divided by 2 for output of block, thus do pooling do decrease map size
+        # when channel *2, feature map size should be divided by 2 at the output of block, thus do pooling do decrease map size
         pool_input = tf.nn.avg_pool(input_layer, ksize = [1, 2, 2, 1], strides = [1, stride, stride, 1], padding = 'VALID') # halved the feature map
         padded_input = tf.pad(pool_input, [[0,0], [0,0], [0,0], [in_channel//2, in_channel//2]])  # doubled input x channels by zero padding(channels are all even number)
     else:
@@ -175,17 +175,6 @@ def inference(input_data_batch, n_blocks, reuse):
     return layers[-1] 
     
 
-def test_graph(train_dir='logs'):
-    '''
-    Run this function to look at the graph structure on tensorboard. A fast way!
-    :param train_dir:
-    '''
-    input_tensor = tf.constant(np.ones([128, 32, 32, 3]), dtype=tf.float32)
-    result = inference(input_tensor, 2, reuse=False)
-    init = tf.global_variables_initializer()
-    sess = tf.Session()
-    sess.run(init)
-    summary_writer = tf.train.SummaryWriter(train_dir, sess.graph)
     
     
     

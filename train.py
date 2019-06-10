@@ -51,13 +51,16 @@ class Train(object):
         # We compute train data and validate data on same session graph. By setting
         # variable_scope reuse = True, we could share the weight variables for the 
         # training and validating
-        global_step = tf.Variable(0, trainable = False)
+        global_step = tf.Variable(0, trainable = False) # this is for compute decay of moving average
         logits = resnet.inference(self.x_data, n_residual_block, False)
         valid_logits = resnet.inference(self.x_valid, n_residual_block, True)  # while reuse = True, share same variables with training model        
         
         train_loss = self.loss(logits, self.y_data)
-        regu_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
-        self.total_loss = tf.add_n([train_loss] + regu_loss)
+        #regu_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        '''weight = tf.trainable_variables()
+        l2_regularizer = tf.contrib.layers.l2_regularizer(0.002)
+        penalty = tf.contrib.layers.apply_regularization(l2_regularizer, weight)'''
+        self.total_loss = train_loss 
         prediction = tf.nn.softmax(logits)
         self.train_top_k_err = self.top_k_error(prediction, self.y_data, 1) # tensor type error
         self.train_op, self.train_ema_op = self.train_operation(self.total_loss, self.train_top_k_err, global_step)
@@ -77,9 +80,9 @@ class Train(object):
         Define optimizer
         '''
         ema_decay = 0.95
-        ema = tf.train.ExponentialMovingAverage(ema_decay, global_step)
+        ema = tf.train.ExponentialMovingAverage(ema_decay, global_step) # global step is to make actual decay increase to its limit
         train_ema_op = ema.apply([total_loss, top_1_err])
-        train_op = tf.train.AdamOptimizer(self.learn_rate).minimize(total_loss, global_step = global_step)
+        train_op = tf.train.AdamOptimizer(self.learn_rate).minimize(total_loss, global_step = global_step) # global step to add 1 after loss is updated
    
         return train_op, train_ema_op     
     
@@ -116,12 +119,9 @@ class Train(object):
         train_labels: 1D array
         return: 4D augmented array, 1D augmented array
         '''
-        # randomly choose a batch to augment
-        #offset = np.random.choice(total_data - train_batch_size) # random choose a start point to count batch, this batch would be augmented
-        #batch_data = train_data[offset:offset + train_batch_size, :]
+        # Randomly do crop and flipping for whole training set 
         batch_data = cifar.random_crop_flip(train_data, padding_size) 
         whitened_data = cifar.whiten_img(batch_data) # augmented data batch
-        #batch_label = train_labels[offset:offset + train_batch_size]
         
         return whitened_data, train_labels
     
@@ -145,7 +145,7 @@ class Train(object):
         self.train_and_valid_graph()  # define training loss, optimizer, error rate
         
         # Initialize saver to save checkpoints, merge all summary, set up a session graph
-        saver = tf.train.Saver(tf.global_variables())
+        saver = tf.train.Saver(tf.global_variables()) # specify all global variables to be save or restore
         summary_op = tf.summary.merge_all()
         init = tf.global_variables_initializer()
         sess = tf.Session() # session graph to run later
@@ -200,11 +200,11 @@ class Train(object):
                 offset = batch * train_batch_size
                 x_train = train_data[offset:offset + train_batch_size, :]
                 y_train = train_labels[offset:offset + train_batch_size]
-                _, _, training_loss, top_1_err_rate = sess.run([self.train_op, self.train_ema_op, self.total_loss, self.train_top_k_err], 
+                _, training_loss, top_1_err_rate = sess.run([self.train_op, self.total_loss, self.train_top_k_err], 
                                                         {self.x_data: x_train,
                                                          self.y_data: y_train})
                 
-                if batch % 100 == 0:
+                if batch % 100 == 0: # show training performance for each 100 batches
                     print('Batch:', batch)
                     print('Training loss: ', training_loss, 'Train top-1 err: ', top_1_err_rate)
     
@@ -223,7 +223,7 @@ class Train(object):
                 print('Validation top-1 error rate:', valid_error)
                 one_batch_val_err = sess.run(self.valid_top_k_err, {self.x_valid: valid_data[0:test_batch_size, :],
                                                     self.y_valid:valid_labels[0:test_batch_size]})
-                print('Validate top-1 error one batch:, ', one_batch_val_err)
+                print('Validate top-1 error one batch: ', one_batch_val_err)
                 
             
                 step_list.append(iterate)
@@ -231,8 +231,8 @@ class Train(object):
                 top_1_list.append(top_1_err_rate)
             
             # Save model checkpoints every 100 steps
-            if iterate % 10 == 0 or (iterate + 1) == train_epoch:
-                saver.save(sess, model_save_path, global_step = iterate)
+            if iterate % 5 == 0 or (iterate + 1) == train_epoch:
+                saver.save(sess, model_save_path, global_step = iterate) # checkpoint name for every (iterate) steps
                 
                 # save train error dataframe
                 df = pd.DataFrame(data = {'steps: ':step_list, 'training loss:': 
