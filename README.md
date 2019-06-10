@@ -23,5 +23,9 @@ Regularization:
 Result: If I remove the regularization term, the training does converge slower, but final accuracy don't vary too much. It seems regularization does have its benefit, but not necessary to get the best performance. 
 
 
+Moving Average:
+ Calculate exponential moving average could smooth the weight, remove the noise and get a average curve representing the trend of the weight updating value. 
+ But I haven't apply the ema.average() and I don't now its benefit to improve performance right now. 
+
 
 
